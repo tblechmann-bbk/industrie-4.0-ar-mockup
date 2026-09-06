@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Industrie 4.0 AR Mockup - Testpage</title>
+  <script src="https://aframe.io/releases/1.4.0/aframe.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/AR-js-org/AR.js@3.4.5/aframe/build/aframe-ar.min.js"></script>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      overflow: hidden;
+    }
+
+    #overlay {
+      display: none;
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      z-index: 10;
+      min-width: 220px;
+      padding: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.45);
+      border-radius: 8px;
+      background: rgba(0, 0, 0, 0.55);
+      backdrop-filter: blur(2px);
+      font-size: 16px;
+      color: #fff;
+    }
+
+    /* Kamera-/Canvas-Darstellung */
+    video, canvas {
+      width: 100vw !important;
+      height: 100vh !important;
+      object-fit: contain !important; /* weniger Zoom-Eindruck */
+    }
+  </style>
+</head>
+<body>
+  <a-scene
+    vr-mode-ui="enabled: false"
+    renderer="logarithmicDepthBuffer: true"
+    embedded
+    arjs="sourceType: webcam; facingMode: environment; sourceWidth: 1280; sourceHeight: 720; displayWidth: 1280; displayHeight: 720; debugUIEnabled: false;">
+    <a-marker preset="hiro" id="hiro-marker"></a-marker>
+    <a-entity camera></a-entity>
+  </a-scene>
+
+  <div id="overlay">
+    <div id="marker-count">Times the Marker was found: 0</div>
+  </div>
+
+  <script>
+    const overlay = document.getElementById('overlay');
+    const hiroMarker = document.getElementById('hiro-marker');
+    const markerCount = document.getElementById('marker-count');
+    let markerFoundCount = 0;
+
+    hiroMarker.addEventListener('markerFound', () => {
+      console.debug('Marker found');
+      markerFoundCount += 1;
+      markerCount.textContent = `Times the Marker was found: ${markerFoundCount}`;
+      overlay.style.display = 'block';
+    });
+
+    hiroMarker.addEventListener('markerLost', () => {
+      console.debug('Marker lost');
+      overlay.style.display = 'none';
+    });
+
+    /* global functions for debugging */
+    window.fireEventMarkerFound = () => {
+      const event = new CustomEvent('markerFound');
+      hiroMarker.dispatchEvent(event);
+    }
+
+    window.fireEventMarkerLost = () => {
+      const event = new CustomEvent('markerLost');
+      hiroMarker.dispatchEvent(event);
+    }
+  </script>
+</body>
+</html>
