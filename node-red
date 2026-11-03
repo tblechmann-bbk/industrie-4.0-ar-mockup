@@ -1,0 +1,589 @@
+[
+    {
+        "id": "3f33f7ac38e608e1",
+        "type": "tab",
+        "label": "AR Zwischenlager (REST + WS + MQTT + SQLite)",
+        "disabled": false,
+        "info": "Node-RED ist die Datenquelle für die AR-App.\n\n1) REST\n   POST /api/auftrag   -> neuen Auftrag erzeugen (201 + JSON)\n   GET  /api/auftrag   -> letzten Auftrag holen (200 / 404)\n   GET  /api/vibration -> aktuellen Vibrationswert holen\n\n2) OPC UA Vibration (Double) wird verteilt über\n   - WebSocket: ws://<pi>:1880/ws/vibration\n   - MQTT: lf7/zwischenlager-emirhantlc/vibration (HiveMQ)\n\nNutzt die vorhandenen Konfigurationen: MQTT-Broker 'HiveMQ public' (b7433598460a3e82) und Milo-Endpoint (68021f9.ba14de).\n\n3) SQLite\n   Jeder Vibrationswert wird in /home/piadmin/armockup.db (Tabelle vibration) gespeichert.\n   GET /api/vibration/durchschnitt -> Durchschnitt der letzten 5 Minuten\n   (optional ?minuten=1..60). Werte älter als 7 Tage werden stündlich gelöscht."
+    },
+    {
+        "id": "b5cc2aa0870b9f53",
+        "type": "comment",
+        "z": "3f33f7ac38e608e1",
+        "name": "1) REST: App fragt Auftrag an (Request -> Response)",
+        "info": "",
+        "x": 230,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "c1fe33ded189210b",
+        "type": "http in",
+        "z": "3f33f7ac38e608e1",
+        "name": "POST /api/auftrag",
+        "url": "/api/auftrag",
+        "method": "post",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 150,
+        "y": 100,
+        "wires": [
+            [
+                "70892e245c6b4b52"
+            ]
+        ]
+    },
+    {
+        "id": "70892e245c6b4b52",
+        "type": "function",
+        "z": "3f33f7ac38e608e1",
+        "name": "Auftrag erzeugen",
+        "func": "// Anfrage der App (Text-Body mit JSON)\nlet req = {};\ntry { req = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : (msg.payload || {}); } catch (e) {}\n\nconst rnd = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;\nconst pick = list => list[Math.floor(Math.random() * list.length)];\n\nlet machineStart = flow.get('machineStart');\nif (!machineStart) {\n    machineStart = new Date(Date.now() - rnd(20 * 60, 8 * 3600) * 1000).toISOString();\n    flow.set('machineStart', machineStart);\n}\nconst scanCount = (flow.get('scanCount') || 0) + 1;\nflow.set('scanCount', scanCount);\n\nlet kugeln = ['Blau', 'Rot', 'Grün']\n    .map(farbe => ({ farbe, anzahl: rnd(0, 5) }))\n    .filter(k => k.anzahl > 0);\nif (kugeln.length === 0) kugeln = [{ farbe: pick(['Blau', 'Rot', 'Grün']), anzahl: rnd(1, 5) }];\n\nconst auftrag = {\n    orderNumber: 'AUF-' + String(rnd(1, 99999)).padStart(5, '0'),\n    palletNumber: String(rnd(1, 9999)).padStart(4, '0'),\n    palletCount: rnd(4, 20),\n    order: { dose: 'Weiß', deckel: pick(['Blau', 'Rot', 'Grün']), kugeln },\n    vibration: flow.get('vibration') ?? null,\n    machineStart,\n    scanCount,\n    marker: req.marker || null,\n    timestamp: new Date().toISOString()\n};\nflow.set('lastOrder', auftrag);\n\nmsg.statusCode = 201;   // Created\nmsg.headers = {\n    'Access-Control-Allow-Origin': '*',\n    'Content-Type': 'application/json; charset=utf-8',\n    'Cache-Control': 'no-store'\n};\nmsg.payload = auftrag;\nnode.status({ fill: 'green', shape: 'dot', text: '201 · ' + auftrag.orderNumber + ' · Scan ' + scanCount });\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "x": 380,
+        "y": 100,
+        "wires": [
+            [
+                "062a7bec235c7927",
+                "1e10697fffc803ef"
+            ]
+        ]
+    },
+    {
+        "id": "1e10697fffc803ef",
+        "type": "debug",
+        "z": "3f33f7ac38e608e1",
+        "name": "REST-Antwort (= Anzeige in der App)",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 670,
+        "y": 60,
+        "wires": []
+    },
+    {
+        "id": "feec8a23d8d7c0d0",
+        "type": "http in",
+        "z": "3f33f7ac38e608e1",
+        "name": "GET /api/auftrag",
+        "url": "/api/auftrag",
+        "method": "get",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 150,
+        "y": 160,
+        "wires": [
+            [
+                "89628ac7356a9b15"
+            ]
+        ]
+    },
+    {
+        "id": "89628ac7356a9b15",
+        "type": "function",
+        "z": "3f33f7ac38e608e1",
+        "name": "Letzten Auftrag holen",
+        "func": "const last = flow.get('lastOrder');\nmsg.headers = {\n    'Access-Control-Allow-Origin': '*',\n    'Content-Type': 'application/json; charset=utf-8',\n    'Cache-Control': 'no-store'\n};\nif (!last) {\n    msg.statusCode = 404;   // Not Found\n    msg.payload = { error: 'Noch kein Auftrag vorhanden' };\n} else {\n    msg.statusCode = 200;   // OK\n    msg.payload = last;\n}\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "x": 390,
+        "y": 160,
+        "wires": [
+            [
+                "062a7bec235c7927"
+            ]
+        ]
+    },
+    {
+        "id": "d7878d6a5554f292",
+        "type": "http in",
+        "z": "3f33f7ac38e608e1",
+        "name": "GET /api/vibration",
+        "url": "/api/vibration",
+        "method": "get",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 150,
+        "y": 220,
+        "wires": [
+            [
+                "a9de499d23f2f4da"
+            ]
+        ]
+    },
+    {
+        "id": "a9de499d23f2f4da",
+        "type": "function",
+        "z": "3f33f7ac38e608e1",
+        "name": "Aktuelle Vibration",
+        "func": "msg.headers = {\n    'Access-Control-Allow-Origin': '*',\n    'Content-Type': 'application/json; charset=utf-8',\n    'Cache-Control': 'no-store'\n};\nmsg.statusCode = 200;\nmsg.payload = {\n    value: flow.get('vibration') ?? null,\n    nodeId: 'ns=2;s=Demo.Alarms.Plant.PowerHouse.P-101.Vibration',\n    timestamp: new Date().toISOString()\n};\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "x": 390,
+        "y": 220,
+        "wires": [
+            [
+                "062a7bec235c7927"
+            ]
+        ]
+    },
+    {
+        "id": "062a7bec235c7927",
+        "type": "http response",
+        "z": "3f33f7ac38e608e1",
+        "name": "HTTP-Antwort",
+        "statusCode": "",
+        "headers": {},
+        "x": 650,
+        "y": 160,
+        "wires": []
+    },
+    {
+        "id": "328911c213c05437",
+        "type": "comment",
+        "z": "3f33f7ac38e608e1",
+        "name": "2) OPC UA Vibration (Double) -> WebSocket + MQTT (startet automatisch)",
+        "info": "",
+        "x": 290,
+        "y": 300,
+        "wires": []
+    },
+    {
+        "id": "e918247992ad1fea",
+        "type": "inject",
+        "z": "3f33f7ac38e608e1",
+        "name": "Start Vibration-Abo",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "3",
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 160,
+        "y": 380,
+        "wires": [
+            [
+                "0f7e5db753fc2ba8"
+            ]
+        ]
+    },
+    {
+        "id": "0f7e5db753fc2ba8",
+        "type": "function",
+        "z": "3f33f7ac38e608e1",
+        "name": "NodeId Vibration",
+        "func": "msg.topic = \"multiple\";\nmsg.payload = [\n    { nodeId: \"ns=2;s=Demo.Alarms.Plant.PowerHouse.P-101.Vibration\" }\n];\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "x": 370,
+        "y": 380,
+        "wires": [
+            [
+                "84e2e44cb9734059"
+            ]
+        ]
+    },
+    {
+        "id": "84e2e44cb9734059",
+        "type": "OpcUa-Client",
+        "z": "3f33f7ac38e608e1",
+        "endpoint": "68021f9.ba14de",
+        "action": "subscribe",
+        "deadbandtype": "a",
+        "deadbandvalue": 0,
+        "time": "1000",
+        "timeUnit": "ms",
+        "certificate": "n",
+        "localfile": "",
+        "localkeyfile": "",
+        "securitymode": "None",
+        "securitypolicy": "None",
+        "useTransport": false,
+        "maxChunkCount": "",
+        "maxMessageSize": "",
+        "receiveBufferSize": "",
+        "sendBufferSize": "",
+        "setstatusandtime": false,
+        "keepsessionalive": false,
+        "name": "OPC UA Vibration",
+        "applicationName": "",
+        "applicationUri": "",
+        "x": 590,
+        "y": 380,
+        "wires": [
+            [
+                "ad712f4e23d23657",
+                "8c2e633ea3d13347"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "8c2e633ea3d13347",
+        "type": "debug",
+        "z": "3f33f7ac38e608e1",
+        "name": "OPC UA roh",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 790,
+        "y": 340,
+        "wires": []
+    },
+    {
+        "id": "ad712f4e23d23657",
+        "type": "function",
+        "z": "3f33f7ac38e608e1",
+        "name": "Vibration extrahieren",
+        "func": "// Bestätigung des Abos ignorieren\nif (msg.topic === 'subscriptionId') return null;\n\n// Wert kann je nach Version direkt oder als DataValue kommen\nlet v = msg.payload;\nif (v && typeof v === 'object') {\n    v = (v.value && typeof v.value === 'object') ? v.value.value : v.value;\n}\nv = Number(v);\nif (!Number.isFinite(v)) return null;\n\nflow.set('vibration', v);\nnode.status({ fill: 'yellow', shape: 'dot', text: v.toFixed(3) });\n\nmsg.topic = 'lf7/zwischenlager-emirhantlc/vibration';\nmsg.payload = {\n    value: v,\n    unit: '',\n    nodeId: 'ns=2;s=Demo.Alarms.Plant.PowerHouse.P-101.Vibration',\n    timestamp: new Date().toISOString()\n};\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "x": 810,
+        "y": 400,
+        "wires": [
+            [
+                "51773f9105d068ee",
+                "243c6e19fad814aa",
+                "bfc74c3a5d823543",
+                "4abfcc1ad26b27f3"
+            ]
+        ]
+    },
+    {
+        "id": "51773f9105d068ee",
+        "type": "websocket out",
+        "z": "3f33f7ac38e608e1",
+        "name": "Vibration per WebSocket",
+        "server": "zl3_ws_listener",
+        "client": "",
+        "x": 1070,
+        "y": 360,
+        "wires": []
+    },
+    {
+        "id": "243c6e19fad814aa",
+        "type": "mqtt out",
+        "z": "3f33f7ac38e608e1",
+        "name": "Vibration per MQTT",
+        "topic": "",
+        "qos": "0",
+        "retain": "true",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "b7433598460a3e82",
+        "x": 1060,
+        "y": 410,
+        "wires": []
+    },
+    {
+        "id": "bfc74c3a5d823543",
+        "type": "debug",
+        "z": "3f33f7ac38e608e1",
+        "name": "Vibration (= Anzeige in der App)",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1080,
+        "y": 460,
+        "wires": []
+    },
+    {
+        "id": "50d305e66418aca0",
+        "type": "comment",
+        "z": "3f33f7ac38e608e1",
+        "name": "3) SQLite: Vibration speichern + REST-Durchschnitt der letzten 5 Minuten",
+        "info": "",
+        "x": 300,
+        "y": 540,
+        "wires": []
+    },
+    {
+        "id": "518ad8d49948654f",
+        "type": "inject",
+        "z": "3f33f7ac38e608e1",
+        "name": "Tabelle anlegen (beim Start)",
+        "props": [
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "0.5",
+        "topic": "CREATE TABLE IF NOT EXISTS vibration (\n  id      INTEGER PRIMARY KEY AUTOINCREMENT,\n  ts      INTEGER NOT NULL,\n  value   REAL    NOT NULL,\n  node_id TEXT\n);\nCREATE INDEX IF NOT EXISTS idx_vibration_ts ON vibration(ts);",
+        "x": 190,
+        "y": 600,
+        "wires": [
+            [
+                "76b068166c7877e5"
+            ]
+        ]
+    },
+    {
+        "id": "c4d8f3ed0d9f4af6",
+        "type": "function",
+        "z": "3f33f7ac38e608e1",
+        "name": "DB bereit",
+        "func": "node.status({ fill: 'green', shape: 'dot', text: 'Tabelle vibration bereit' });\nreturn null;",
+        "outputs": 1,
+        "noerr": 0,
+        "x": 620,
+        "y": 600,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "4abfcc1ad26b27f3",
+        "type": "function",
+        "z": "3f33f7ac38e608e1",
+        "name": "Parameter für INSERT",
+        "func": "msg.params = {\n    $ts: Date.now(),\n    $value: msg.payload.value,\n    $nodeId: msg.payload.nodeId\n};\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "x": 1090,
+        "y": 520,
+        "wires": [
+            [
+                "eacb4cf2ac85d9f9"
+            ]
+        ]
+    },
+    {
+        "id": "b7f96e31078613f4",
+        "type": "http in",
+        "z": "3f33f7ac38e608e1",
+        "name": "GET /api/vibration/durchschnitt",
+        "url": "/api/vibration/durchschnitt",
+        "method": "get",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 190,
+        "y": 680,
+        "wires": [
+            [
+                "48acfc3ee0ce2e3f"
+            ]
+        ]
+    },
+    {
+        "id": "48acfc3ee0ce2e3f",
+        "type": "function",
+        "z": "3f33f7ac38e608e1",
+        "name": "Zeitraum festlegen",
+        "func": "// Standard: 5 Minuten, optional ?minuten=1..60\nlet minuten = parseInt(msg.req.query.minuten, 10);\nif (!Number.isFinite(minuten)) minuten = 5;\nminuten = Math.min(60, Math.max(1, minuten));\n\nmsg.minuten = minuten;\nmsg.params = { $since: Date.now() - minuten * 60 * 1000 };\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 440,
+        "y": 680,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "fbe3ad218ed64442",
+        "type": "function",
+        "z": "3f33f7ac38e608e1",
+        "name": "Antwort bauen",
+        "func": "msg.headers = {\n    'Access-Control-Allow-Origin': '*',\n    'Content-Type': 'application/json; charset=utf-8',\n    'Cache-Control': 'no-store'\n};\nconst r = (msg.payload && msg.payload[0]) || {};\n\nif (!r.count) {\n    msg.statusCode = 404;\n    msg.payload = { error: 'Keine Werte in den letzten ' + msg.minuten + ' Minuten', minuten: msg.minuten, count: 0 };\n} else {\n    msg.statusCode = 200;\n    msg.payload = {\n        average: r.avg,\n        count: r.count,\n        min: r.min,\n        max: r.max,\n        minuten: msg.minuten,\n        from: new Date(r.from_ts).toISOString(),\n        to: new Date(r.to_ts).toISOString(),\n        nodeId: 'ns=2;s=Demo.Alarms.Plant.PowerHouse.P-101.Vibration'\n    };\n    node.status({ fill: 'blue', shape: 'dot', text: 'Ø ' + r.avg.toFixed(3) + ' aus ' + r.count + ' Werten' });\n}\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 860,
+        "y": 680,
+        "wires": [
+            [
+                "062a7bec235c7927",
+                "a641e05f03107678"
+            ]
+        ]
+    },
+    {
+        "id": "a641e05f03107678",
+        "type": "debug",
+        "z": "3f33f7ac38e608e1",
+        "name": "Durchschnitt (REST-Antwort)",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1100,
+        "y": 680,
+        "wires": []
+    },
+    {
+        "id": "725aa52bb1fe70bf",
+        "type": "inject",
+        "z": "3f33f7ac38e608e1",
+        "name": "stündlich aufräumen",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "3600",
+        "crontab": "",
+        "once": false,
+        "onceDelay": "",
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 180,
+        "y": 760,
+        "wires": [
+            [
+                "f19376391c99cd93"
+            ]
+        ]
+    },
+    {
+        "id": "76b068166c7877e5",
+        "type": "sqlite",
+        "z": "3f33f7ac38e608e1",
+        "mydb": "589562a09c8663e6",
+        "sqlquery": "batch",
+        "sql": "",
+        "name": "CREATE TABLE",
+        "x": 430,
+        "y": 600,
+        "wires": [
+            [
+                "c4d8f3ed0d9f4af6"
+            ]
+        ]
+    },
+    {
+        "id": "eacb4cf2ac85d9f9",
+        "type": "sqlite",
+        "z": "3f33f7ac38e608e1",
+        "mydb": "589562a09c8663e6",
+        "sqlquery": "prepared",
+        "sql": "INSERT INTO vibration (ts, value, node_id) VALUES ($ts, $value, $nodeId)",
+        "name": "INSERT vibration",
+        "x": 1310,
+        "y": 520,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "2ca68ef21f05b8ac",
+        "type": "sqlite",
+        "z": "3f33f7ac38e608e1",
+        "mydb": "589562a09c8663e6",
+        "sqlquery": "prepared",
+        "sql": "SELECT AVG(value) AS avg,\n       COUNT(*)   AS count,\n       MIN(value) AS min,\n       MAX(value) AS max,\n       MIN(ts)    AS from_ts,\n       MAX(ts)    AS to_ts\nFROM vibration\nWHERE ts >= $since",
+        "name": "SELECT AVG(value)",
+        "x": 650,
+        "y": 680,
+        "wires": [
+            [
+                "fbe3ad218ed64442"
+            ]
+        ]
+    },
+    {
+        "id": "f19376391c99cd93",
+        "type": "sqlite",
+        "z": "3f33f7ac38e608e1",
+        "mydb": "589562a09c8663e6",
+        "sqlquery": "fixed",
+        "sql": "DELETE FROM vibration WHERE ts < (strftime('%s','now') - 7*24*3600) * 1000",
+        "name": "Werte > 7 Tage löschen",
+        "x": 420,
+        "y": 760,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "68021f9.ba14de",
+        "type": "OpcUa-Endpoint",
+        "name": "",
+        "endpoint": "opc.tcp://milo.digitalpetri.com:62541/milo",
+        "secpol": "None",
+        "secmode": "None",
+        "none": true,
+        "login": false,
+        "usercert": false,
+        "usercertificate": "",
+        "userprivatekey": ""
+    },
+    {
+        "id": "zl3_ws_listener",
+        "type": "websocket-listener",
+        "path": "/ws/vibration",
+        "wholemsg": "false"
+    },
+    {
+        "id": "b7433598460a3e82",
+        "type": "mqtt-broker",
+        "name": "HiveMQ public",
+        "broker": "broker.hivemq.com",
+        "port": "1883",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "closeTopic": "",
+        "willTopic": ""
+    },
+    {
+        "id": "589562a09c8663e6",
+        "type": "sqlitedb",
+        "db": "/home/piadmin/armockup.db",
+        "mode": "RWC"
+    },
+    {
+        "id": "fb761b7bbe21f715",
+        "type": "global-config",
+        "env": [],
+        "modules": {
+            "node-red-contrib-opcua": "0.2.355",
+            "node-red-node-sqlite": "2.0.1"
+        }
+    }
+]
